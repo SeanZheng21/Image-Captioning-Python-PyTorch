@@ -8,7 +8,7 @@ from torch.nn.utils.rnn import pack_padded_sequence
 from models import Encoder, DecoderWithAttention
 from datasets import *
 from utils import *
-from nltk.translate.bleu_score import corpus_bleu
+from bleu_score import corpus_bleu
 
 # Data parameters
 data_folder = '/opt/WorkSpace_Jizong2/coco_dataset/output'  # folder with data files saved by create_input_files.py
