@@ -1,12 +1,14 @@
-import os
-import numpy as np
-import h5py
 import json
-import torch
-from scipy.misc import imread, imresize
-from tqdm import tqdm
+import os
 from collections import Counter
 from random import seed, choice, sample
+
+import h5py
+import numpy as np
+import torch
+from cv2 import imread, resize as imresize
+# from scipy.misc import imread, imresize
+from tqdm import tqdm
 
 
 def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_image, min_word_freq, output_folder,
