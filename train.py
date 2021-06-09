@@ -1,4 +1,6 @@
+import argparse
 import time
+from contextlib import nullcontext
 
 import torch.backends.cudnn as cudnn
 import torch.optim
@@ -13,8 +15,15 @@ from datasets import CaptionDataset
 from models import Encoder, DecoderWithAttention
 from utils import *
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--data-folder", required=True, type=str, help="data folder")
+parser.add_argument("--enable-scale", action="store_true", default=False, help="enable mixed training")
+parser.add_argument("--batch-size", "-s", default=64, type=int, help="batch size")
+parser.add_argument("--finetune-encoder", default=False, action="store_true", help="finetune encoder")
+args = parser.parse_args()
+
 # Data parameters
-data_folder = '/opt/WorkSpace_Jizong2/coco_dataset/output'  # folder with data files saved by create_input_files.py
+data_folder = args.data_folder  # folder with data files saved by create_input_files.py
 data_name = 'coco_5_cap_per_img_5_min_word_freq'  # base name shared by data files
 
 # Model parameters
@@ -29,17 +38,17 @@ cudnn.benchmark = True  # set to true only if inputs to model are fixed size; ot
 start_epoch = 0
 epochs = 120  # number of epochs to train for (if early stopping is not triggered)
 epochs_since_improvement = 0  # keeps track of number of epochs since there's been an improvement in validation BLEU
-batch_size = 32
-workers = 1  # for data-loading; right now, only 1 works with h5py
+batch_size = args.batch_size
+workers = 16  # for data-loading; right now, only 1 works with h5py
 encoder_lr = 1e-4  # learning rate for encoder if fine-tuning
 decoder_lr = 4e-4  # learning rate for decoder
 grad_clip = 5.  # clip gradients at an absolute value of
 alpha_c = 1.  # regularization parameter for 'doubly stochastic attention', as in the paper
 best_bleu4 = 0.  # BLEU-4 score right now
 print_freq = 100  # print training/validation stats every __ batches
-fine_tune_encoder = False  # fine-tune encoder?
+fine_tune_encoder = args.finetune_encoder  # fine-tune encoder?
 checkpoint = None  # path to checkpoint, None if none
-enable_amp = True  # enable mixed training for a faster speed and less memory usage.
+enable_amp = args.enable_scale  # enable mixed training for a faster speed and less memory usage.
 
 
 def main():
@@ -55,30 +64,30 @@ def main():
         word_map = json.load(j)
 
     # Initialize / load checkpoint
-    if checkpoint is None:
-        decoder = DecoderWithAttention(attention_dim=attention_dim,
-                                       embed_dim=emb_dim,
-                                       decoder_dim=decoder_dim,
-                                       vocab_size=len(word_map),
-                                       dropout=dropout)
-        decoder_optimizer = torch.optim.Adam(params=filter(lambda p: p.requires_grad, decoder.parameters()),
-                                             lr=decoder_lr)
-        encoder = Encoder()
-        encoder.fine_tune(fine_tune_encoder)
-        encoder_optimizer = torch.optim.Adam(params=filter(lambda p: p.requires_grad, encoder.parameters()),
-                                             lr=encoder_lr) if fine_tune_encoder else None
+    encoder = Encoder()
+    decoder = DecoderWithAttention(attention_dim=attention_dim,
+                                   embed_dim=emb_dim,
+                                   decoder_dim=decoder_dim,
+                                   vocab_size=len(word_map),
+                                   dropout=dropout)
+    encoder_optimizer = torch.optim.Adam(params=filter(lambda p: p.requires_grad, encoder.parameters()),
+                                         lr=encoder_lr) if fine_tune_encoder else None
+    decoder_optimizer = torch.optim.Adam(params=filter(lambda p: p.requires_grad, decoder.parameters()),
+                                         lr=decoder_lr)
+    encoder.fine_tune(fine_tune_encoder)
+    scaler = GradScaler(enabled=enable_amp)
 
-    else:
-        raise RuntimeError("The loading and saving ways are wrong.")
-        # how can you load the network in this way??????
-        checkpoint = torch.load(checkpoint)
+    if checkpoint:
+        checkpoint = torch.load(checkpoint, map_location="cpu")
         start_epoch = checkpoint['epoch'] + 1
         epochs_since_improvement = checkpoint['epochs_since_improvement']
         best_bleu4 = checkpoint['bleu-4']
-        decoder = checkpoint['decoder']
-        decoder_optimizer = checkpoint['decoder_optimizer']
-        encoder = checkpoint['encoder']
-        encoder_optimizer = checkpoint['encoder_optimizer']
+
+        decoder.load_state_dict(checkpoint['decoder'])
+        decoder_optimizer.load_state_dict(checkpoint['decoder_optimizer'])
+        encoder.load_state_dict(checkpoint['encoder'])
+        encoder_optimizer.load_state_dict(checkpoint['encoder_optimizer'])
+        scaler.load_state_dict(checkpoint["scaler"])
         if fine_tune_encoder is True and encoder_optimizer is None:
             encoder.fine_tune(fine_tune_encoder)
             encoder_optimizer = torch.optim.Adam(params=filter(lambda p: p.requires_grad, encoder.parameters()),
@@ -100,8 +109,6 @@ def main():
     val_loader = torch.utils.data.DataLoader(
         CaptionDataset(data_folder, data_name, 'VAL', transform=transforms.Compose([normalize])),
         batch_size=batch_size, shuffle=True, num_workers=workers, pin_memory=True)
-
-    scaler = GradScaler(enabled=True)
 
     # Epochs
     for epoch in range(start_epoch, epochs):
@@ -179,7 +186,8 @@ def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decod
         caplens = caplens.to(device, non_blocking=True)
         with autocast(enabled=enable_amp):
             # Forward prop.
-            imgs = encoder(imgs)
+            with torch.no_grad() if encoder_optimizer is None else nullcontext():
+                imgs = encoder(imgs)
             scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs, caps, caplens)
 
             # Since we decoded starting with <start>, the targets are all words after <start>, up to <end>
@@ -325,13 +333,14 @@ def validate(val_loader, encoder, decoder, criterion, scaler):
             assert len(references) == len(hypotheses)
 
         # Calculate BLEU-4 scores
-        bleu4 = corpus_bleu(references, hypotheses)
+        bleu1 = corpus_bleu(references, hypotheses, weights=[1, 0, 0, 0])
+        bleu2 = corpus_bleu(references, hypotheses, weights=[0.5, 0.5, 0, 0])
+        bleu3 = corpus_bleu(references, hypotheses, weights=[1 / 3, 1 / 3, 1 / 3, 0])
+        bleu4 = corpus_bleu(references, hypotheses, weights=[1 / 4, 1 / 4, 1 / 4, 1 / 4])
 
-        print(
-            '\n * LOSS - {loss.avg:.3f}, TOP-5 ACCURACY - {top5.avg:.3f}, BLEU-4 - {bleu}\n'.format(
-                loss=losses,
-                top5=top5accs,
-                bleu=bleu4))
+        print('\n * LOSS - {loss.avg:.3f}, TOP-5 ACCURACY - {top5.avg:.3f}, '
+              'BLEU - [{bleu1} {bleu2} {bleu3} {bleu4}]\n'.format(
+            loss=losses, top5=top5accs, bleu4=bleu4, bleu3=bleu3, bleu2=bleu2, bleu1=bleu1))
 
     return bleu4
 
