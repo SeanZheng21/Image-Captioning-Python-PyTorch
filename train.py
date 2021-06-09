@@ -21,6 +21,7 @@ parser.add_argument("--enable-scale", action="store_true", default=False, help="
 parser.add_argument("--batch-size", "-s", default=64, type=int, help="batch size")
 parser.add_argument("--finetune-encoder", default=False, action="store_true", help="finetune encoder")
 parser.add_argument("--save_dir", required=True, type=str, help="path to save the checkpoint")
+parser.add_argument("--checkpoint", type=str, default=None, help="checkpoint")
 args = parser.parse_args()
 
 # Data parameters
@@ -48,7 +49,7 @@ alpha_c = 1.  # regularization parameter for 'doubly stochastic attention', as i
 best_bleu4 = 0.  # BLEU-4 score right now
 print_freq = 100  # print training/validation stats every __ batches
 fine_tune_encoder = args.finetune_encoder  # fine-tune encoder?
-checkpoint = None  # path to checkpoint, None if none
+checkpoint = args.checkpoint  # path to checkpoint, None if none
 enable_amp = args.enable_scale  # enable mixed training for a faster speed and less memory usage.
 
 
@@ -100,6 +101,9 @@ def main():
     # Move to GPU, if available
     decoder = decoder.to(device)
     encoder = encoder.to(device)
+    optimizer_to(decoder_optimizer, device)
+    if encoder_optimizer:
+        optimizer_to(encoder_optimizer, device)
 
     # Loss function
     criterion = nn.CrossEntropyLoss().to(device)
@@ -344,7 +348,7 @@ def validate(val_loader, encoder, decoder, criterion, scaler):
         bleu4 = corpus_bleu(references, hypotheses, weights=[1 / 4, 1 / 4, 1 / 4, 1 / 4])
 
         print('\n * LOSS - {loss.avg:.3f}, TOP-5 ACCURACY - {top5.avg:.3f}, '
-              'BLEU - [{bleu1} {bleu2} {bleu3} {bleu4}]\n'.format(
+              'BLEU - [{bleu1:.3f} {bleu2:.3f} {bleu3:.3f} {bleu4:.3f}]\n'.format(
             loss=losses, top5=top5accs, bleu4=bleu4, bleu3=bleu3, bleu2=bleu2, bleu1=bleu1))
 
     return bleu4
