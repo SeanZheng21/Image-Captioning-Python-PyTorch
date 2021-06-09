@@ -9,6 +9,8 @@ import torch
 from cv2 import imread, resize as imresize
 # from scipy.misc import imread, imresize
 from tqdm import tqdm
+from multiprocessing.dummy import Pool
+import shutil
 
 
 def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_image, min_word_freq, output_folder,
@@ -89,7 +91,9 @@ def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_i
     for impaths, imcaps, split in [(train_image_paths, train_image_captions, 'TRAIN'),
                                    (val_image_paths, val_image_captions, 'VAL'),
                                    (test_image_paths, test_image_captions, 'TEST')]:
-
+        save_name = os.path.join(output_folder, split + '_IMAGES_' + base_filename + '.hdf5')
+        if os.path.exists(save_name):
+            os.remove(save_name)
         with h5py.File(os.path.join(output_folder, split + '_IMAGES_' + base_filename + '.hdf5'), 'a') as h:
             # Make a note of the number of captions we are sampling per image
             h.attrs['captions_per_image'] = captions_per_image
@@ -101,10 +105,9 @@ def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_i
 
             enc_captions = []
             caplens = []
+            indicator = tqdm(range(len(impaths)))
 
-            for i, path in enumerate(tqdm(impaths)):
-
-                # Sample captions
+            def write_items(i):
                 if len(imcaps[i]) < captions_per_image:
                     captions = imcaps[i] + [choice(imcaps[i]) for _ in range(captions_per_image - len(imcaps[i]))]
                 else:
@@ -136,6 +139,11 @@ def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_i
 
                     enc_captions.append(enc_c)
                     caplens.append(c_len)
+                indicator.update()
+            with indicator:
+                with Pool(100) as pool:
+                    pool.map(write_items, range(len(impaths)))
+
 
             # Sanity check
             assert images.shape[0] * captions_per_image == len(enc_captions) == len(caplens)
@@ -208,7 +216,7 @@ def clip_gradient(optimizer, grad_clip):
 
 
 def save_checkpoint(data_name, epoch, epochs_since_improvement, encoder, decoder, encoder_optimizer, decoder_optimizer,
-                    bleu4, is_best):
+                    bleu4, is_best, scaler):
     """
     Saves model checkpoint.
 
@@ -225,10 +233,11 @@ def save_checkpoint(data_name, epoch, epochs_since_improvement, encoder, decoder
     state = {'epoch': epoch,
              'epochs_since_improvement': epochs_since_improvement,
              'bleu-4': bleu4,
-             'encoder': encoder,
-             'decoder': decoder,
-             'encoder_optimizer': encoder_optimizer,
-             'decoder_optimizer': decoder_optimizer}
+             'encoder': encoder.state_dict(),
+             'decoder': decoder.state_dict(),
+             'encoder_optimizer': encoder_optimizer.state_dict(),
+             'decoder_optimizer': decoder_optimizer.state_dict(),
+             'scaler': scaler.state_dict()}
     filename = 'checkpoint_' + data_name + '.pth.tar'
     torch.save(state, filename)
     # If this checkpoint is the best so far, store a copy so it doesn't get overwritten by a worse checkpoint
