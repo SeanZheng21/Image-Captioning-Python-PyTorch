@@ -20,6 +20,7 @@ parser.add_argument("--data-folder", required=True, type=str, help="data folder"
 parser.add_argument("--enable-scale", action="store_true", default=False, help="enable mixed training")
 parser.add_argument("--batch-size", "-s", default=64, type=int, help="batch size")
 parser.add_argument("--finetune-encoder", default=False, action="store_true", help="finetune encoder")
+parser.add_argument("--save_dir", required=True, type=str, help="path to save the checkpoint")
 args = parser.parse_args()
 
 # Data parameters
@@ -86,7 +87,10 @@ def main():
         decoder.load_state_dict(checkpoint['decoder'])
         decoder_optimizer.load_state_dict(checkpoint['decoder_optimizer'])
         encoder.load_state_dict(checkpoint['encoder'])
-        encoder_optimizer.load_state_dict(checkpoint['encoder_optimizer'])
+        try:
+            encoder_optimizer.load_state_dict(checkpoint['encoder_optimizer'])
+        except Exception:
+            pass
         scaler.load_state_dict(checkpoint["scaler"])
         if fine_tune_encoder is True and encoder_optimizer is None:
             encoder.fine_tune(fine_tune_encoder)
@@ -149,8 +153,8 @@ def main():
             epochs_since_improvement = 0
 
         # Save checkpoint
-        save_checkpoint(data_name, epoch, epochs_since_improvement, encoder, decoder, encoder_optimizer,
-                        decoder_optimizer, recent_bleu4, is_best)
+        save_checkpoint(data_name, args.save_dir, epoch, epochs_since_improvement, encoder, decoder, encoder_optimizer,
+                        decoder_optimizer, recent_bleu4, is_best, scaler)
 
 
 def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_optimizer, epoch, scaler):

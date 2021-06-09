@@ -2,6 +2,7 @@ import json
 import os
 from collections import Counter
 from multiprocessing.dummy import Pool
+from pathlib import Path
 from random import seed, choice, sample
 
 import h5py
@@ -215,7 +216,8 @@ def clip_gradient(optimizer, grad_clip):
                 param.grad.data.clamp_(-grad_clip, grad_clip)
 
 
-def save_checkpoint(data_name, epoch, epochs_since_improvement, encoder, decoder, encoder_optimizer, decoder_optimizer,
+def save_checkpoint(data_name, save_dir: str, epoch, epochs_since_improvement, encoder, decoder, encoder_optimizer,
+                    decoder_optimizer,
                     bleu4, is_best, scaler):
     """
     Saves model checkpoint.
@@ -235,14 +237,19 @@ def save_checkpoint(data_name, epoch, epochs_since_improvement, encoder, decoder
              'bleu-4': bleu4,
              'encoder': encoder.state_dict(),
              'decoder': decoder.state_dict(),
-             'encoder_optimizer': encoder_optimizer.state_dict(),
              'decoder_optimizer': decoder_optimizer.state_dict(),
              'scaler': scaler.state_dict()}
+    if encoder_optimizer:
+        state.update(
+            {'encoder_optimizer': encoder_optimizer.state_dict(), }
+        )
     filename = 'checkpoint_' + data_name + '.pth.tar'
     torch.save(state, filename)
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
     # If this checkpoint is the best so far, store a copy so it doesn't get overwritten by a worse checkpoint
     if is_best:
-        torch.save(state, 'BEST_' + filename)
+        torch.save(state, str(save_dir / ('BEST_' + filename)))
 
 
 class AverageMeter(object):

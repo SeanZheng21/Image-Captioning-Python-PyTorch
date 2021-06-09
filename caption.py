@@ -9,7 +9,6 @@ import torch
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 from PIL import Image
-import numpy as np
 from cv2 import imread, resize as imresize
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -166,13 +165,13 @@ def visualize_att(image_path, seq, alphas, rev_word_map, smooth=True):
     :param smooth: smooth weights?
     """
     image = Image.open(image_path)
-    image = image.resize([14 * 24, 14 * 24], Image.LANCZOS)
+    image = np.asarray(image.resize([14 * 24, 14 * 24], Image.LANCZOS))
 
     words = [rev_word_map[ind] for ind in seq]
     for t in range(len(words)):
         if t > 50:
             break
-        plt.subplot(np.ceil(len(words) / 5.), 5, t + 1)
+        plt.subplot(int(np.ceil(len(words) / 5.)), 5, t + 1)
 
         plt.text(0, 1, '%s' % (words[t]), color='black', backgroundcolor='white', fontsize=12)
         plt.imshow(image)
