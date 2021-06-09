@@ -1,14 +1,16 @@
 import time
+
 import torch.backends.cudnn as cudnn
 import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
 from torch import nn
 from torch.nn.utils.rnn import pack_padded_sequence
-from models import Encoder, DecoderWithAttention
-from datasets import *
-from utils import *
+
 from bleu_score import corpus_bleu
+from datasets import CaptionDataset
+from models import Encoder, DecoderWithAttention
+from utils import *
 
 # Data parameters
 data_folder = '/opt/WorkSpace_Jizong2/coco_dataset/output'  # folder with data files saved by create_input_files.py
@@ -163,9 +165,9 @@ def train(train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_
         data_time.update(time.time() - start)
 
         # Move to GPU, if available
-        imgs = imgs.to(device)
-        caps = caps.to(device)
-        caplens = caplens.to(device)
+        imgs = imgs.to(device, non_blocking=True)
+        caps = caps.to(device, non_blocking=True)
+        caplens = caplens.to(device, non_blocking=True)
 
         # Forward prop.
         imgs = encoder(imgs)
@@ -288,7 +290,8 @@ def validate(val_loader, encoder, decoder, criterion):
                 print('Validation: [{0}/{1}]\t'
                       'Batch Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                      'Top-5 Accuracy {top5.val:.3f} ({top5.avg:.3f})\t'.format(i, len(val_loader), batch_time=batch_time,
+                      'Top-5 Accuracy {top5.val:.3f} ({top5.avg:.3f})\t'.format(i, len(val_loader),
+                                                                                batch_time=batch_time,
                                                                                 loss=losses, top5=top5accs))
 
             # Store references (true captions), and hypothesis (prediction) for each image
