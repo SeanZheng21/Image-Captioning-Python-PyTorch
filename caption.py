@@ -1,14 +1,16 @@
+import argparse
+import json
+
+import matplotlib.cm as cm
+import matplotlib.pyplot as plt
+import numpy as np
+import skimage.transform
 import torch
 import torch.nn.functional as F
-import numpy as np
-import json
 import torchvision.transforms as transforms
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-import skimage.transform
-import argparse
-from cv2 import imread, resize as imresize
 from PIL import Image
+import numpy as np
+from cv2 import imread, resize as imresize
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -30,6 +32,8 @@ def caption_image_beam_search(encoder, decoder, image_path, word_map, beam_size=
 
     # Read image and process
     img = imread(image_path)
+    if img is None:
+        raise RuntimeError(image_path)
     if len(img.shape) == 2:
         img = img[:, :, np.newaxis]
         img = np.concatenate([img, img, img], axis=2)
@@ -106,6 +110,8 @@ def caption_image_beam_search(encoder, decoder, image_path, word_map, beam_size=
         # Convert unrolled indices to actual indices of scores
         prev_word_inds = top_k_words / vocab_size  # (s)
         next_word_inds = top_k_words % vocab_size  # (s)
+        prev_word_inds = prev_word_inds.long()
+        next_word_inds = next_word_inds.long()
 
         # Add new words to sequences, alphas
         seqs = torch.cat([seqs[prev_word_inds], next_word_inds.unsqueeze(1)], dim=1)  # (s, step+1)
@@ -163,7 +169,6 @@ def visualize_att(image_path, seq, alphas, rev_word_map, smooth=True):
     image = image.resize([14 * 24, 14 * 24], Image.LANCZOS)
 
     words = [rev_word_map[ind] for ind in seq]
-
     for t in range(len(words)):
         if t > 50:
             break
