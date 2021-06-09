@@ -1,6 +1,7 @@
 import json
 import os
 from collections import Counter
+from multiprocessing.dummy import Pool
 from random import seed, choice, sample
 
 import h5py
@@ -8,9 +9,8 @@ import numpy as np
 import torch
 from cv2 import imread, resize as imresize
 # from scipy.misc import imread, imresize
+from torch.utils.data import Sampler
 from tqdm import tqdm
-from multiprocessing.dummy import Pool
-import shutil
 
 
 def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_image, min_word_freq, output_folder,
@@ -140,10 +140,10 @@ def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_i
                     enc_captions.append(enc_c)
                     caplens.append(c_len)
                 indicator.update()
+
             with indicator:
                 with Pool(100) as pool:
                     pool.map(write_items, range(len(impaths)))
-
 
             # Sanity check
             assert images.shape[0] * captions_per_image == len(enc_captions) == len(caplens)
@@ -295,3 +295,26 @@ def accuracy(scores, targets, k):
     correct = ind.eq(targets.view(-1, 1).expand_as(ind))
     correct_total = correct.view(-1).float().sum()  # 0D tensor
     return correct_total.item() * (100.0 / batch_size)
+
+
+class InfiniteRandomSampler(Sampler):
+
+    def __init__(self, data_source, shuffle=True):
+        super().__init__(data_source)
+        self.data_source = data_source
+        self.shuffle = shuffle
+
+    def __iter__(self):
+        if len(self.data_source) > 0:
+            while True:
+                yield from self.__iter_once__()
+        else:
+            yield from iter([])
+
+    def __iter_once__(self):
+        if self.shuffle:
+            return iter(torch.randperm(len(self.data_source)).tolist())
+        return iter(torch.arange(start=0, end=len(self.data_source)).tolist())
+
+    def __len__(self):
+        return len(self.data_source)

@@ -103,12 +103,13 @@ def main():
     # Custom dataloaders
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
-    train_loader = torch.utils.data.DataLoader(
-        CaptionDataset(data_folder, data_name, 'TRAIN', transform=transforms.Compose([normalize])),
-        batch_size=batch_size, shuffle=True, num_workers=workers, pin_memory=True)
+    train_set = CaptionDataset(data_folder, data_name, 'TRAIN', transform=transforms.Compose([normalize]))
+    train_loader = iter(torch.utils.data.DataLoader(
+        train_set, batch_size=batch_size, num_workers=workers, pin_memory=True,
+        sampler=InfiniteRandomSampler(train_set, shuffle=True)))
+    val_set = CaptionDataset(data_folder, data_name, 'VAL', transform=transforms.Compose([normalize]))
     val_loader = torch.utils.data.DataLoader(
-        CaptionDataset(data_folder, data_name, 'VAL', transform=transforms.Compose([normalize])),
-        batch_size=batch_size, shuffle=True, num_workers=workers, pin_memory=True)
+        val_set, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
 
     # Epochs
     for epoch in range(start_epoch, epochs):
@@ -177,7 +178,7 @@ def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decod
     start = time.time()
 
     # Batches
-    for i, (imgs, caps, caplens) in enumerate(train_loader):
+    for i, (imgs, caps, caplens) in zip(range(len(train_loader)), train_loader):
         data_time.update(time.time() - start)
 
         # Move to GPU, if available
