@@ -5,6 +5,7 @@ import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
 from torch import nn
+from torch.cuda.amp import GradScaler, autocast
 from torch.nn.utils.rnn import pack_padded_sequence
 
 from bleu_score import corpus_bleu
@@ -38,6 +39,7 @@ best_bleu4 = 0.  # BLEU-4 score right now
 print_freq = 100  # print training/validation stats every __ batches
 fine_tune_encoder = False  # fine-tune encoder?
 checkpoint = None  # path to checkpoint, None if none
+enable_amp = True  # enable mixed training for a faster speed and less memory usage.
 
 
 def main():
@@ -67,6 +69,8 @@ def main():
                                              lr=encoder_lr) if fine_tune_encoder else None
 
     else:
+        raise RuntimeError("The loading and saving ways are wrong.")
+        # how can you load the network in this way??????
         checkpoint = torch.load(checkpoint)
         start_epoch = checkpoint['epoch'] + 1
         epochs_since_improvement = checkpoint['epochs_since_improvement']
@@ -97,6 +101,8 @@ def main():
         CaptionDataset(data_folder, data_name, 'VAL', transform=transforms.Compose([normalize])),
         batch_size=batch_size, shuffle=True, num_workers=workers, pin_memory=True)
 
+    scaler = GradScaler(enabled=True)
+
     # Epochs
     for epoch in range(start_epoch, epochs):
 
@@ -115,13 +121,15 @@ def main():
               criterion=criterion,
               encoder_optimizer=encoder_optimizer,
               decoder_optimizer=decoder_optimizer,
-              epoch=epoch)
+              epoch=epoch,
+              scaler=scaler)
 
         # One epoch's validation
         recent_bleu4 = validate(val_loader=val_loader,
                                 encoder=encoder,
                                 decoder=decoder,
-                                criterion=criterion)
+                                criterion=criterion,
+                                scaler=scaler)
 
         # Check if there was an improvement
         is_best = recent_bleu4 > best_bleu4
@@ -137,7 +145,7 @@ def main():
                         decoder_optimizer, recent_bleu4, is_best)
 
 
-def train(train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_optimizer, epoch):
+def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_optimizer, epoch, scaler):
     """
     Performs one epoch's training.
 
@@ -148,6 +156,7 @@ def train(train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_
     :param encoder_optimizer: optimizer to update encoder's weights (if fine-tuning)
     :param decoder_optimizer: optimizer to update decoder's weights
     :param epoch: epoch number
+    :param scaler: automixed training scaler
     """
 
     decoder.train()  # train mode (dropout and batchnorm is used)
@@ -168,41 +177,38 @@ def train(train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_
         imgs = imgs.to(device, non_blocking=True)
         caps = caps.to(device, non_blocking=True)
         caplens = caplens.to(device, non_blocking=True)
+        with autocast(enabled=enable_amp):
+            # Forward prop.
+            imgs = encoder(imgs)
+            scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs, caps, caplens)
 
-        # Forward prop.
-        imgs = encoder(imgs)
-        scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs, caps, caplens)
+            # Since we decoded starting with <start>, the targets are all words after <start>, up to <end>
+            targets = caps_sorted[:, 1:]
 
-        # Since we decoded starting with <start>, the targets are all words after <start>, up to <end>
-        targets = caps_sorted[:, 1:]
+            # Remove timesteps that we didn't decode at, or are pads
+            # pack_padded_sequence is an easy trick to do this
+            scores = pack_padded_sequence(scores, decode_lengths, batch_first=True)[0]
+            targets = pack_padded_sequence(targets, decode_lengths, batch_first=True)[0]
 
-        # Remove timesteps that we didn't decode at, or are pads
-        # pack_padded_sequence is an easy trick to do this
-        scores = pack_padded_sequence(scores, decode_lengths, batch_first=True)[0]
-        targets = pack_padded_sequence(targets, decode_lengths, batch_first=True)[0]
+            # Calculate loss
+            loss = criterion(scores, targets)
 
-        # Calculate loss
-        loss = criterion(scores, targets)
-
-        # Add doubly stochastic attention regularization
-        loss += alpha_c * ((1. - alphas.sum(dim=1)) ** 2).mean()
-
-        # Back prop.
-        decoder_optimizer.zero_grad()
+            # Add doubly stochastic attention regularization
+            loss += alpha_c * ((1. - alphas.sum(dim=1)) ** 2).mean()
+        scaler.scale(loss).backward()
+        # gradient clip following: https://pytorch.org/docs/stable/notes/amp_examples.html#gradient-clipping
         if encoder_optimizer is not None:
-            encoder_optimizer.zero_grad()
-        loss.backward()
+            scaler.unscale_(encoder_optimizer)
+        scaler.unscale_(decoder_optimizer)
+        if encoder_optimizer:
+            torch.nn.utils.clip_grad_norm_(encoder.parameters(), grad_clip)  # here we change the absolute value to norm
+        torch.nn.utils.clip_grad_norm_(decoder.parameters(), grad_clip)  # here we change the absolute value to norm
 
-        # Clip gradients
-        if grad_clip is not None:
-            clip_gradient(decoder_optimizer, grad_clip)
-            if encoder_optimizer is not None:
-                clip_gradient(encoder_optimizer, grad_clip)
-
-        # Update weights
-        decoder_optimizer.step()
         if encoder_optimizer is not None:
-            encoder_optimizer.step()
+            scaler.step(encoder_optimizer)
+        scaler.step(decoder_optimizer)
+
+        scaler.update()
 
         # Keep track of metrics
         top5 = accuracy(scores, targets, 5)
@@ -224,7 +230,7 @@ def train(train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_
                                                                           top5=top5accs))
 
 
-def validate(val_loader, encoder, decoder, criterion):
+def validate(val_loader, encoder, decoder, criterion, scaler):
     """
     Performs one epoch's validation.
 
@@ -257,23 +263,23 @@ def validate(val_loader, encoder, decoder, criterion):
             imgs = imgs.to(device)
             caps = caps.to(device)
             caplens = caplens.to(device)
+            with autocast(enabled=enable_amp):
+                # Forward prop.
+                if encoder is not None:
+                    imgs = encoder(imgs)
+                scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs, caps, caplens)
 
-            # Forward prop.
-            if encoder is not None:
-                imgs = encoder(imgs)
-            scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs, caps, caplens)
+                # Since we decoded starting with <start>, the targets are all words after <start>, up to <end>
+                targets = caps_sorted[:, 1:]
 
-            # Since we decoded starting with <start>, the targets are all words after <start>, up to <end>
-            targets = caps_sorted[:, 1:]
+                # Remove timesteps that we didn't decode at, or are pads
+                # pack_padded_sequence is an easy trick to do this
+                scores_copy = scores.clone()
+                scores = pack_padded_sequence(scores, decode_lengths, batch_first=True)[0]
+                targets = pack_padded_sequence(targets, decode_lengths, batch_first=True)[0]
 
-            # Remove timesteps that we didn't decode at, or are pads
-            # pack_padded_sequence is an easy trick to do this
-            scores_copy = scores.clone()
-            scores = pack_padded_sequence(scores, decode_lengths, batch_first=True)[0]
-            targets = pack_padded_sequence(targets, decode_lengths, batch_first=True)[0]
-
-            # Calculate loss
-            loss = criterion(scores, targets)
+                # Calculate loss
+                loss = criterion(scores, targets)
 
             # Add doubly stochastic attention regularization
             loss += alpha_c * ((1. - alphas.sum(dim=1)) ** 2).mean()
