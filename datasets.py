@@ -70,7 +70,7 @@ class CaptionDataset(Dataset):
 
     def __len__(self):
         if on_debug():
-            return self.dataset_size // 20
+            return self.dataset_size // 50
         return self.dataset_size
 
 # from torch.nn.utils.rnn import pad_sequence

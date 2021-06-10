@@ -98,17 +98,16 @@ def main():
     decoder = decoder.to(device)
     encoder = encoder.to(device)
     optimizer_to(decoder_optimizer, device)
-    if encoder_optimizer:
-        optimizer_to(encoder_optimizer, device)
+    optimizer_to(encoder_optimizer, device)
 
     # Loss function
     criterion = nn.CrossEntropyLoss().to(device)
 
     # Custom dataloaders
     train_set = CaptionDataset(data_folder, data_name, 'TRAIN', transform=train_augment())
-    train_loader = torch.utils.data.DataLoader(
+    train_loader = iter(torch.utils.data.DataLoader(
         train_set, batch_size=batch_size, num_workers=workers, pin_memory=True,
-        sampler=InfiniteRandomSampler(train_set, shuffle=True))
+        sampler=InfiniteRandomSampler(train_set, shuffle=True)))
     val_set = CaptionDataset(data_folder, data_name, 'VAL', transform=val_augment())
     val_loader = torch.utils.data.DataLoader(
         val_set, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
@@ -127,9 +126,12 @@ def main():
 
             if epoch == (start_epoch + epochs) // 2:
                 encoder.fine_tune(True)
-
+                fine_tune_encoder = True
+                print("enable encoder training")
+            writer.add_scalar("tra/encoder_lr", encoder_optimizer.param_groups[0]["lr"])
+            writer.add_scalar("tra/decoder_lr", decoder_optimizer.param_groups[0]["lr"])
             # One epoch's training
-            tra_mean_loss, tra_mean_t5acc = train(train_loader=iter(train_loader),
+            tra_mean_loss, tra_mean_t5acc = train(train_loader=train_loader,
                                                   encoder=encoder,
                                                   decoder=decoder,
                                                   criterion=criterion,
@@ -140,13 +142,12 @@ def main():
             writer.add_scalar("tra/loss", tra_mean_loss, global_step=epoch)
             writer.add_scalar("tra/top5acc", tra_mean_t5acc, global_step=epoch)
 
-
             # One epoch's validation
             bleu1, bleu2, bleu3, recent_bleu4, val_mean_loss, val_mean_t5acc = validate(val_loader=val_loader,
-                                                                        encoder=encoder,
-                                                                        decoder=decoder,
-                                                                        criterion=criterion,
-                                                                        scaler=scaler)
+                                                                                        encoder=encoder,
+                                                                                        decoder=decoder,
+                                                                                        criterion=criterion,
+                                                                                        scaler=scaler)
 
             writer.add_scalar("val/loss", val_mean_loss, global_step=epoch)
             writer.add_scalar("val/top5acc", val_mean_t5acc, global_step=epoch)
@@ -167,7 +168,6 @@ def main():
             save_checkpoint(data_name, args.save_dir, epoch, epochs_since_improvement, encoder, decoder,
                             encoder_optimizer,
                             decoder_optimizer, recent_bleu4, is_best, scaler)
-
 
 
 def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_optimizer, epoch, scaler):
@@ -203,7 +203,7 @@ def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decod
         caps = caps.to(device, non_blocking=True)
         caplens = caplens.to(device, non_blocking=True)
         with autocast(enabled=enable_amp):
-            with torch.no_grad() if encoder_optimizer is None else nullcontext():
+            with torch.no_grad() if not fine_tune_encoder else nullcontext():
                 image_encodings = encoder(imgs)
 
             scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(image_encodings, caps, caplens)
@@ -221,14 +221,22 @@ def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decod
 
             # Add doubly stochastic attention regularization
             loss += alpha_c * ((1. - alphas.sum(dim=1)) ** 2).mean()
+
+        if fine_tune_encoder:
+            encoder_optimizer.zero_grad()
+        decoder_optimizer.zero_grad()
+
         scaler.scale(loss).backward()
+
         # gradient clip following: https://pytorch.org/docs/stable/notes/amp_examples.html#gradient-clipping
-        scaler.unscale_(encoder_optimizer)
+        if fine_tune_encoder:
+            scaler.unscale_(encoder_optimizer)
         scaler.unscale_(decoder_optimizer)
         torch.nn.utils.clip_grad_norm_(encoder.parameters(), grad_clip)  # here we change the absolute value to norm
         torch.nn.utils.clip_grad_norm_(decoder.parameters(), grad_clip)  # here we change the absolute value to norm
 
-        scaler.step(encoder_optimizer)
+        if fine_tune_encoder:
+            scaler.step(encoder_optimizer)
         scaler.step(decoder_optimizer)
 
         scaler.update()
