@@ -18,7 +18,7 @@ epochs = 120  # number of epochs to train for (if early stopping is not triggere
 epochs_since_improvement = 0  # keeps track of number of epochs since there's been an improvement in validation BLEU
 
 workers = 16  # for data-loading; right now, only 1 works with h5py
-encoder_lr = 1e-4  # learning rate for encoder if fine-tuning
+encoder_lr = 1e-5  # learning rate for encoder if fine-tuning
 decoder_lr = 4e-4  # learning rate for decoder
 grad_clip = 5.  # clip gradients at an absolute value of
 alpha_c = 1.  # regularization parameter for 'doubly stochastic attention', as in the paper

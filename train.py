@@ -8,6 +8,7 @@ import torchvision.transforms as transforms
 from torch import nn
 from torch.cuda.amp import GradScaler, autocast
 from torch.nn.utils.rnn import pack_padded_sequence
+from torch.utils.tensorboard import SummaryWriter
 from torch_optimizer import RAdam
 
 from bleu_score import corpus_bleu
@@ -70,9 +71,8 @@ def main():
                                    decoder_dim=decoder_dim,
                                    vocab_size=len(word_map),
                                    dropout=dropout)
-    encoder_optimizer = RAdam(params=filter(lambda p: p.requires_grad, encoder.parameters()),
-                              lr=encoder_lr, weight_decay=1e-5) if fine_tune_encoder else None
-    decoder_optimizer = RAdam(params=filter(lambda p: p.requires_grad, decoder.parameters()),
+    encoder_optimizer = RAdam(params=encoder.parameters(), lr=encoder_lr)
+    decoder_optimizer = RAdam(params=decoder.parameters(),
                               lr=decoder_lr, weight_decay=1e-5)
     encoder.fine_tune(fine_tune_encoder)
     scaler = GradScaler(enabled=enable_amp)
@@ -112,47 +112,62 @@ def main():
     val_set = CaptionDataset(data_folder, data_name, 'VAL', transform=val_augment())
     val_loader = torch.utils.data.DataLoader(
         val_set, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
-
+    writer = SummaryWriter(log_dir=os.path.join(args.save_dir, "tb"))
     # Epochs
-    for epoch in range(start_epoch, epochs):
+    with writer:
+        for epoch in range(start_epoch, epochs):
 
-        # Decay learning rate if there is no improvement for 8 consecutive epochs, and terminate training after 20
-        if epochs_since_improvement == 20:
-            break
-        if epochs_since_improvement > 0 and epochs_since_improvement % 8 == 0:
-            adjust_learning_rate(decoder_optimizer, 0.8)
-            if fine_tune_encoder:
-                adjust_learning_rate(encoder_optimizer, 0.8)
+            # Decay learning rate if there is no improvement for 8 consecutive epochs, and terminate training after 20
+            if epochs_since_improvement == 20:
+                break
+            if epochs_since_improvement > 0 and epochs_since_improvement % 8 == 0:
+                adjust_learning_rate(decoder_optimizer, 0.8)
+                if fine_tune_encoder:
+                    adjust_learning_rate(encoder_optimizer, 0.8)
 
-        # One epoch's training
-        train(train_loader=iter(train_loader),
-              encoder=encoder,
-              decoder=decoder,
-              criterion=criterion,
-              encoder_optimizer=encoder_optimizer,
-              decoder_optimizer=decoder_optimizer,
-              epoch=epoch,
-              scaler=scaler)
+            if epoch == (start_epoch + epochs) // 2:
+                encoder.fine_tune(True)
 
-        # One epoch's validation
-        recent_bleu4 = validate(val_loader=val_loader,
-                                encoder=encoder,
-                                decoder=decoder,
-                                criterion=criterion,
-                                scaler=scaler)
+            # One epoch's training
+            tra_mean_loss, tra_mean_t5acc = train(train_loader=iter(train_loader),
+                                                  encoder=encoder,
+                                                  decoder=decoder,
+                                                  criterion=criterion,
+                                                  encoder_optimizer=encoder_optimizer,
+                                                  decoder_optimizer=decoder_optimizer,
+                                                  epoch=epoch,
+                                                  scaler=scaler)
+            writer.add_scalar("tra/loss", tra_mean_loss, global_step=epoch)
+            writer.add_scalar("tra/top5acc", tra_mean_t5acc, global_step=epoch)
 
-        # Check if there was an improvement
-        is_best = recent_bleu4 > best_bleu4
-        best_bleu4 = max(recent_bleu4, best_bleu4)
-        if not is_best:
-            epochs_since_improvement += 1
-            print("\nEpochs since last improvement: %d\n" % (epochs_since_improvement,))
-        else:
-            epochs_since_improvement = 0
 
-        # Save checkpoint
-        save_checkpoint(data_name, args.save_dir, epoch, epochs_since_improvement, encoder, decoder, encoder_optimizer,
-                        decoder_optimizer, recent_bleu4, is_best, scaler)
+            # One epoch's validation
+            bleu1, bleu2, bleu3, recent_bleu4, val_mean_loss, val_mean_t5acc = validate(val_loader=val_loader,
+                                                                        encoder=encoder,
+                                                                        decoder=decoder,
+                                                                        criterion=criterion,
+                                                                        scaler=scaler)
+
+            writer.add_scalar("val/loss", val_mean_loss, global_step=epoch)
+            writer.add_scalar("val/top5acc", val_mean_t5acc, global_step=epoch)
+            writer.add_scalar("val/b1", bleu1, global_step=epoch)
+            writer.add_scalar("val/b2", bleu2, global_step=epoch)
+            writer.add_scalar("val/b3", bleu3, global_step=epoch)
+            writer.add_scalar("val/b4", recent_bleu4, global_step=epoch)
+            # Check if there was an improvement
+            is_best = recent_bleu4 > best_bleu4
+            best_bleu4 = max(recent_bleu4, best_bleu4)
+            if not is_best:
+                epochs_since_improvement += 1
+                print("\nEpochs since last improvement: %d\n" % (epochs_since_improvement,))
+            else:
+                epochs_since_improvement = 0
+
+            # Save checkpoint
+            save_checkpoint(data_name, args.save_dir, epoch, epochs_since_improvement, encoder, decoder,
+                            encoder_optimizer,
+                            decoder_optimizer, recent_bleu4, is_best, scaler)
+
 
 
 def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_optimizer, epoch, scaler):
@@ -208,15 +223,12 @@ def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decod
             loss += alpha_c * ((1. - alphas.sum(dim=1)) ** 2).mean()
         scaler.scale(loss).backward()
         # gradient clip following: https://pytorch.org/docs/stable/notes/amp_examples.html#gradient-clipping
-        if encoder_optimizer is not None:
-            scaler.unscale_(encoder_optimizer)
+        scaler.unscale_(encoder_optimizer)
         scaler.unscale_(decoder_optimizer)
-        if encoder_optimizer:
-            torch.nn.utils.clip_grad_norm_(encoder.parameters(), grad_clip)  # here we change the absolute value to norm
+        torch.nn.utils.clip_grad_norm_(encoder.parameters(), grad_clip)  # here we change the absolute value to norm
         torch.nn.utils.clip_grad_norm_(decoder.parameters(), grad_clip)  # here we change the absolute value to norm
 
-        if encoder_optimizer is not None:
-            scaler.step(encoder_optimizer)
+        scaler.step(encoder_optimizer)
         scaler.step(decoder_optimizer)
 
         scaler.update()
@@ -239,6 +251,7 @@ def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decod
                                                                           batch_time=batch_time,
                                                                           data_time=data_time, loss=losses,
                                                                           top5=top5accs))
+    return losses.avg, top5accs.avg
 
 
 def validate(val_loader, encoder, decoder, criterion, scaler):
@@ -344,7 +357,7 @@ def validate(val_loader, encoder, decoder, criterion, scaler):
               'BLEU - [{bleu1:.3f} {bleu2:.3f} {bleu3:.3f} {bleu4:.3f}]\n'.format(
             loss=losses, top5=top5accs, bleu4=bleu4, bleu3=bleu3, bleu2=bleu2, bleu1=bleu1))
 
-    return bleu4
+    return bleu1, bleu2, bleu3, bleu4, losses.avg, top5accs.avg
 
 
 if __name__ == '__main__':
