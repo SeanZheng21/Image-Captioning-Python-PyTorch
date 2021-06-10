@@ -2,7 +2,6 @@ import argparse
 import time
 from contextlib import nullcontext
 
-import torch.backends.cudnn as cudnn
 import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
@@ -11,6 +10,7 @@ from torch.cuda.amp import GradScaler, autocast
 from torch.nn.utils.rnn import pack_padded_sequence
 
 from bleu_score import corpus_bleu
+from config import *
 from datasets import CaptionDataset
 from models import Encoder, DecoderWithAttention
 from utils import *
@@ -24,33 +24,30 @@ parser.add_argument("--save_dir", required=True, type=str, help="path to save th
 parser.add_argument("--checkpoint", type=str, default=None, help="checkpoint")
 args = parser.parse_args()
 
-# Data parameters
 data_folder = args.data_folder  # folder with data files saved by create_input_files.py
-data_name = 'coco_5_cap_per_img_5_min_word_freq'  # base name shared by data files
-
-# Model parameters
-emb_dim = 512  # dimension of word embeddings
-attention_dim = 512  # dimension of attention linear layers
-decoder_dim = 512  # dimension of decoder RNN
-dropout = 0.5
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # sets device for model and PyTorch tensors
-cudnn.benchmark = True  # set to true only if inputs to model are fixed size; otherwise lot of computational overhead
-
-# Training parameters
-start_epoch = 0
-epochs = 120  # number of epochs to train for (if early stopping is not triggered)
-epochs_since_improvement = 0  # keeps track of number of epochs since there's been an improvement in validation BLEU
 batch_size = args.batch_size
-workers = 16  # for data-loading; right now, only 1 works with h5py
-encoder_lr = 1e-4  # learning rate for encoder if fine-tuning
-decoder_lr = 4e-4  # learning rate for decoder
-grad_clip = 5.  # clip gradients at an absolute value of
-alpha_c = 1.  # regularization parameter for 'doubly stochastic attention', as in the paper
-best_bleu4 = 0.  # BLEU-4 score right now
-print_freq = 100  # print training/validation stats every __ batches
 fine_tune_encoder = args.finetune_encoder  # fine-tune encoder?
 checkpoint = args.checkpoint  # path to checkpoint, None if none
 enable_amp = args.enable_scale  # enable mixed training for a faster speed and less memory usage.
+
+normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225])
+
+
+def train_augment():
+    return transforms.Compose([
+        transforms.RandomCrop(224),
+        transforms.RandomHorizontalFlip(),
+        transforms.ColorJitter(brightness=[0.9, 1.1], contrast=[0.9, 1.1]),
+        normalize
+    ])
+
+
+def test_augment():
+    return transforms.Compose([
+        transforms.CenterCrop(224),
+        normalize
+    ])
 
 
 def main():
@@ -88,10 +85,8 @@ def main():
         decoder.load_state_dict(checkpoint['decoder'])
         decoder_optimizer.load_state_dict(checkpoint['decoder_optimizer'])
         encoder.load_state_dict(checkpoint['encoder'])
-        try:
+        with IgnoreException(Exception):
             encoder_optimizer.load_state_dict(checkpoint['encoder_optimizer'])
-        except Exception:
-            pass
         scaler.load_state_dict(checkpoint["scaler"])
         if fine_tune_encoder is True and encoder_optimizer is None:
             encoder.fine_tune(fine_tune_encoder)
@@ -109,13 +104,11 @@ def main():
     criterion = nn.CrossEntropyLoss().to(device)
 
     # Custom dataloaders
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-    train_set = CaptionDataset(data_folder, data_name, 'TRAIN', transform=transforms.Compose([normalize]))
-    train_loader = iter(torch.utils.data.DataLoader(
+    train_set = CaptionDataset(data_folder, data_name, 'TRAIN', transform=train_augment())
+    train_loader = torch.utils.data.DataLoader(
         train_set, batch_size=batch_size, num_workers=workers, pin_memory=True,
-        sampler=InfiniteRandomSampler(train_set, shuffle=True)))
-    val_set = CaptionDataset(data_folder, data_name, 'VAL', transform=transforms.Compose([normalize]))
+        sampler=InfiniteRandomSampler(train_set, shuffle=True))
+    val_set = CaptionDataset(data_folder, data_name, 'VAL', transform=test_augment())
     val_loader = torch.utils.data.DataLoader(
         val_set, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
 
@@ -131,7 +124,7 @@ def main():
                 adjust_learning_rate(encoder_optimizer, 0.8)
 
         # One epoch's training
-        train(train_loader=train_loader,
+        train(train_loader=iter(train_loader),
               encoder=encoder,
               decoder=decoder,
               criterion=criterion,
@@ -196,8 +189,8 @@ def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decod
         with autocast(enabled=enable_amp):
             # Forward prop.
             with torch.no_grad() if encoder_optimizer is None else nullcontext():
-                imgs = encoder(imgs)
-            scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs, caps, caplens)
+                image_encodings = encoder(imgs)
+            scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(image_encodings, caps, caplens)
 
             # Since we decoded starting with <start>, the targets are all words after <start>, up to <end>
             targets = caps_sorted[:, 1:]
@@ -257,9 +250,8 @@ def validate(val_loader, encoder, decoder, criterion, scaler):
     :param criterion: loss layer
     :return: BLEU-4 score
     """
-    decoder.eval()  # eval mode (no dropout or batchnorm)
-    if encoder is not None:
-        encoder.eval()
+    decoder.eval()
+    encoder.eval()
 
     batch_time = AverageMeter()
     losses = AverageMeter()

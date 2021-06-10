@@ -340,3 +340,16 @@ def optimizer_to(optim, device):
                     subparam.data = subparam.data.to(device)
                     if subparam._grad is not None:
                         subparam._grad.data = subparam._grad.data.to(device)
+
+
+class IgnoreException:
+    def __init__(self, *exception):
+        self.exception = exception
+
+    def __enter__(self):
+        print("Entering Context")
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if isinstance(exc_value, self.exception):
+            return
+        return exc_type, exc_value, traceback

@@ -5,15 +5,19 @@ import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import numpy as np
 import skimage.transform
-import torch
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 from PIL import Image
 from cv2 import imread, resize as imresize
 
+from config import *
+from models import Encoder, DecoderWithAttention
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+dtype = torch.half
 
 
+@torch.no_grad()
 def caption_image_beam_search(encoder, decoder, image_path, word_map, beam_size=3):
     """
     Reads an image and captions it with beam search.
@@ -39,7 +43,7 @@ def caption_image_beam_search(encoder, decoder, image_path, word_map, beam_size=
     img = imresize(img, (256, 256))
     img = img.transpose(2, 0, 1)
     img = img / 255.
-    img = torch.FloatTensor(img).to(device)
+    img = torch.FloatTensor(img).to(device).type(dtype)
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
     transform = transforms.Compose([normalize])
@@ -199,20 +203,28 @@ if __name__ == '__main__':
     parser.add_argument('--dont_smooth', dest='smooth', action='store_false', help='do not smooth alpha overlay')
 
     args = parser.parse_args()
-
-    # Load model
-    checkpoint = torch.load(args.model, map_location=str(device))
-    decoder = checkpoint['decoder']
-    decoder = decoder.to(device)
-    decoder.eval()
-    encoder = checkpoint['encoder']
-    encoder = encoder.to(device)
-    encoder.eval()
-
     # Load word map (word2ix)
     with open(args.word_map, 'r') as j:
         word_map = json.load(j)
     rev_word_map = {v: k for k, v in word_map.items()}  # ix2word
+
+    encoder = Encoder()
+    decoder = DecoderWithAttention(attention_dim=attention_dim,
+                                   embed_dim=emb_dim,
+                                   decoder_dim=decoder_dim,
+                                   vocab_size=len(word_map),
+                                   dropout=dropout)
+
+    # Load model
+    checkpoint = torch.load(args.model, map_location=str(device))
+    decoder.load_state_dict(checkpoint['decoder'])
+    decoder.to(device)
+    decoder.eval()
+    decoder.type(dtype)
+    encoder.load_state_dict(checkpoint['encoder'])
+    encoder.to(device)
+    encoder.eval()
+    encoder.type(dtype)
 
     # Encode, decode with attention and beam search
     seq, alphas = caption_image_beam_search(encoder, decoder, args.img, word_map, args.beam_size)
