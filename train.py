@@ -8,6 +8,7 @@ import torchvision.transforms as transforms
 from torch import nn
 from torch.cuda.amp import GradScaler, autocast
 from torch.nn.utils.rnn import pack_padded_sequence
+from torch_optimizer import RAdam
 
 from bleu_score import corpus_bleu
 from config import *
@@ -43,7 +44,7 @@ def train_augment():
     ])
 
 
-def test_augment():
+def val_augment():
     return transforms.Compose([
         transforms.CenterCrop(224),
         normalize
@@ -69,10 +70,10 @@ def main():
                                    decoder_dim=decoder_dim,
                                    vocab_size=len(word_map),
                                    dropout=dropout)
-    encoder_optimizer = torch.optim.Adam(params=filter(lambda p: p.requires_grad, encoder.parameters()),
-                                         lr=encoder_lr) if fine_tune_encoder else None
-    decoder_optimizer = torch.optim.Adam(params=filter(lambda p: p.requires_grad, decoder.parameters()),
-                                         lr=decoder_lr)
+    encoder_optimizer = RAdam(params=filter(lambda p: p.requires_grad, encoder.parameters()),
+                              lr=encoder_lr, weight_decay=1e-5) if fine_tune_encoder else None
+    decoder_optimizer = RAdam(params=filter(lambda p: p.requires_grad, decoder.parameters()),
+                              lr=decoder_lr, weight_decay=1e-5)
     encoder.fine_tune(fine_tune_encoder)
     scaler = GradScaler(enabled=enable_amp)
 
@@ -108,7 +109,7 @@ def main():
     train_loader = torch.utils.data.DataLoader(
         train_set, batch_size=batch_size, num_workers=workers, pin_memory=True,
         sampler=InfiniteRandomSampler(train_set, shuffle=True))
-    val_set = CaptionDataset(data_folder, data_name, 'VAL', transform=test_augment())
+    val_set = CaptionDataset(data_folder, data_name, 'VAL', transform=val_augment())
     val_loader = torch.utils.data.DataLoader(
         val_set, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
 
@@ -187,9 +188,9 @@ def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decod
         caps = caps.to(device, non_blocking=True)
         caplens = caplens.to(device, non_blocking=True)
         with autocast(enabled=enable_amp):
-            # Forward prop.
             with torch.no_grad() if encoder_optimizer is None else nullcontext():
                 image_encodings = encoder(imgs)
+
             scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(image_encodings, caps, caplens)
 
             # Since we decoded starting with <start>, the targets are all words after <start>, up to <end>
