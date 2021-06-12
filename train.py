@@ -124,12 +124,8 @@ def main():
                 if fine_tune_encoder:
                     adjust_learning_rate(encoder_optimizer, 0.8)
 
-            if epoch == (start_epoch + epochs) // 2:
-                encoder.fine_tune(True)
-                fine_tune_encoder = True
-                print("enable encoder training")
-            writer.add_scalar("tra/encoder_lr", encoder_optimizer.param_groups[0]["lr"])
-            writer.add_scalar("tra/decoder_lr", decoder_optimizer.param_groups[0]["lr"])
+            writer.add_scalar("tra/encoder_lr", encoder_optimizer.param_groups[0]["lr"], global_step=epoch)
+            writer.add_scalar("tra/decoder_lr", decoder_optimizer.param_groups[0]["lr"], global_step=epoch)
             # One epoch's training
             tra_mean_loss, tra_mean_t5acc = train(train_loader=train_loader,
                                                   encoder=encoder,
