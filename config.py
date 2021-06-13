@@ -14,7 +14,7 @@ cudnn.benchmark = True  # set to true only if inputs to model are fixed size; ot
 
 # Training parameters
 start_epoch = 0
-epochs = 60  # number of epochs to train for (if early stopping is not triggered)
+epochs = 300  # number of epochs to train for (if early stopping is not triggered)
 epochs_since_improvement = 0  # keeps track of number of epochs since there's been an improvement in validation BLEU
 
 workers = 16  # for data-loading; right now, only 1 works with h5py

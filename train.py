@@ -13,7 +13,7 @@ from torch_optimizer import RAdam
 
 from bleu_score import corpus_bleu
 from config import *
-from datasets import CaptionDataset
+from datasets import CaptionDataset2 as CaptionDataset, PadCollate
 from models import Encoder, DecoderWithAttention
 from utils import *
 
@@ -107,7 +107,7 @@ def main():
     train_set = CaptionDataset(data_folder, data_name, 'TRAIN', transform=train_augment())
     train_loader = iter(torch.utils.data.DataLoader(
         train_set, batch_size=batch_size, num_workers=workers, pin_memory=True,
-        sampler=InfiniteRandomSampler(train_set, shuffle=True)))
+        sampler=InfiniteRandomSampler(train_set, shuffle=True), collate_fn=PadCollate()))
     val_set = CaptionDataset(data_folder, data_name, 'VAL', transform=val_augment())
     val_loader = torch.utils.data.DataLoader(
         val_set, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
