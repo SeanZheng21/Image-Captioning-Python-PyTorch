@@ -244,6 +244,8 @@ def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decod
         batch_time.update(time.time() - start)
 
         start = time.time()
+        if torch.isnan(loss):
+            raise RuntimeError(loss)
 
         # Print status
         if i % print_freq == 0:
