@@ -159,7 +159,7 @@ class DecoderWithAttention(nn.Module):
         c = self.init_c(mean_encoder_out)
         return h, c
 
-    def forward(self, encoder_out, encoded_captions, caption_lengths):
+    def forward(self, encoder_out, encoded_captions, caption_lengths, return_hidden_state=False):
         """
         Forward propagation.
 
@@ -182,6 +182,10 @@ class DecoderWithAttention(nn.Module):
         encoder_out = encoder_out[sort_ind]
         encoded_captions = encoded_captions[sort_ind]
 
+        # revert index:
+        revert_index = torch.LongTensor(
+            [x for _, x in sorted([(n, i) for i, n in enumerate(sort_ind)], key=lambda t: t[0])]).to(device)
+
         # Embedding
         embeddings = self.embedding(encoded_captions)  # (batch_size, max_caption_length, embed_dim)
 
@@ -193,8 +197,10 @@ class DecoderWithAttention(nn.Module):
         decode_lengths = (caption_lengths - 1).tolist()
 
         # Create tensors to hold word prediction scores and alphas
-        predictions = torch.zeros(batch_size, max(decode_lengths), vocab_size).to(device)
-        alphas = torch.zeros(batch_size, max(decode_lengths), num_pixels).to(device)
+        predictions = torch.zeros(batch_size, max(decode_lengths), vocab_size, device=device)
+        alphas = torch.zeros(batch_size, max(decode_lengths), num_pixels, device=device)
+        last_hs = torch.zeros(batch_size, self.decoder_dim, device=device)
+        last_cs = torch.zeros(batch_size, self.decoder_dim, device=device)
 
         # At each time-step, decode by
         # attention-weighing the encoder's output based on the decoder's previous hidden state output
@@ -211,7 +217,11 @@ class DecoderWithAttention(nn.Module):
             preds = self.fc(self.dropout(h))  # (batch_size_t, vocab_size)
             predictions[:batch_size_t, current_t, :] = preds
             alphas[:batch_size_t, current_t, :] = alpha
+            last_hs[:batch_size_t, :] = h
+            last_cs[:batch_size_t, :] = c
 
+        if return_hidden_state:
+            return predictions, encoded_captions, decode_lengths, alphas, sort_ind, (last_hs, last_cs), revert_index
         return predictions, encoded_captions, decode_lengths, alphas, sort_ind
 
 
@@ -248,3 +258,19 @@ class LSTMClassifier(nn.Module):
         text_out = torch.sigmoid(text_fea)
 
         return text_out
+
+
+class HiddenStateProjector(nn.Module):
+    def __init__(self, input_dim, output_dim, hidden_dim):
+        super().__init__()
+        self._input_dim = input_dim
+        self._output_dim = output_dim
+        self._hidden_dim = hidden_dim
+        self._projector = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LeakyReLU(inplace=True),
+            nn.Linear(hidden_dim, output_dim),
+        )
+
+    def forward(self, x):
+        return self._projector(x)

@@ -1,0 +1,3 @@
+#!/bin/bash
+python -O pretrain_embedding.py --data-folder contrastive_pretrained --enable-scale -s 32   -h
+python -O train.py --dataloader .. --enable-scale -s 48 -h

@@ -5,6 +5,7 @@ from contextlib import nullcontext
 import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
+from loguru import logger
 from torch import nn
 from torch.cuda.amp import GradScaler, autocast
 from torch.nn.utils.rnn import pack_padded_sequence
@@ -17,20 +18,20 @@ from datasets import CaptionDataset2 as CaptionDataset, PadCollate
 from models import Encoder, DecoderWithAttention
 from utils import *
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--data-folder", required=True, type=str, help="data folder")
-parser.add_argument("--enable-scale", action="store_true", default=False, help="enable mixed training")
-parser.add_argument("--batch-size", "-s", default=64, type=int, help="batch size")
-parser.add_argument("--finetune-encoder", default=False, action="store_true", help="finetune encoder")
-parser.add_argument("--save_dir", required=True, type=str, help="path to save the checkpoint")
-parser.add_argument("--checkpoint", type=str, default=None, help="checkpoint")
-args = parser.parse_args()
 
-data_folder = args.data_folder  # folder with data files saved by create_input_files.py
-batch_size = args.batch_size
-fine_tune_encoder = args.finetune_encoder  # fine-tune encoder?
-checkpoint = args.checkpoint  # path to checkpoint, None if none
-enable_amp = args.enable_scale  # enable mixed training for a faster speed and less memory usage.
+def get_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-folder", required=True, type=str, help="data folder")
+    parser.add_argument("--enable-scale", action="store_true", default=False, help="enable mixed training")
+    parser.add_argument("--batch-size", "-s", default=64, type=int, help="batch size")
+    parser.add_argument("--finetune-encoder", default=False, action="store_true", help="finetune encoder")
+    parser.add_argument("--save_dir", required=True, type=str, help="path to save the checkpoint")
+    parser.add_argument("--checkpoint", type=str, default=None, help="checkpoint")
+    parser.add_argument("--pretrained-checkpoint", type=str, default=None,
+                        help="pretrained checkpoint using sentence embedding")
+    args = parser.parse_args()
+    return args
+
 
 normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                  std=[0.229, 0.224, 0.225])
@@ -52,12 +53,19 @@ def val_augment():
     ])
 
 
-def main():
+def main(args):
     """
     Training and validation.
     """
 
-    global best_bleu4, epochs_since_improvement, checkpoint, start_epoch, fine_tune_encoder, data_name, word_map
+    data_folder = args.data_folder  # folder with data files saved by create_input_files.py
+    batch_size = args.batch_size
+    fine_tune_encoder = args.finetune_encoder  # fine-tune encoder?
+    checkpoint = args.checkpoint  # path to checkpoint, None if none
+    pretrained_checkpoint = args.pretrained_checkpoint  # path to checkpoint, None if none
+    enable_amp = args.enable_scale  # enable mixed training for a faster speed and less memory usage.
+
+    global word_map, start_epoch, epochs_since_improvement, best_bleu4
 
     # Read word map
     word_map_file = os.path.join(data_folder, 'WORDMAP_' + data_name + '.json')
@@ -76,8 +84,16 @@ def main():
                               lr=decoder_lr, weight_decay=1e-5)
     encoder.fine_tune(fine_tune_encoder)
     scaler = GradScaler(enabled=enable_amp)
+    if enable_amp:
+        logger.info(f"{'Enable' if enable_amp else 'Disable'} mixed training!")
+
+    if pretrained_checkpoint:
+        logger.info(f"loading pretrained-checkpoint from: {pretrained_checkpoint}")
+        pretrained_state = torch.load(pretrained_checkpoint, map_location="cpu")
+        decoder.load_state_dict(pretrained_state["decoder"])
 
     if checkpoint:
+        logger.info(f"loading checkpoint from: {checkpoint}")
         checkpoint = torch.load(checkpoint, map_location="cpu")
         start_epoch = checkpoint['epoch'] + 1
         epochs_since_improvement = checkpoint['epochs_since_improvement']
@@ -134,7 +150,7 @@ def main():
                                                   encoder_optimizer=encoder_optimizer,
                                                   decoder_optimizer=decoder_optimizer,
                                                   epoch=epoch,
-                                                  scaler=scaler)
+                                                  scaler=scaler, args=args)
             writer.add_scalar("tra/loss", tra_mean_loss, global_step=epoch)
             writer.add_scalar("tra/top5acc", tra_mean_t5acc, global_step=epoch)
 
@@ -143,7 +159,8 @@ def main():
                                                                                         encoder=encoder,
                                                                                         decoder=decoder,
                                                                                         criterion=criterion,
-                                                                                        scaler=scaler)
+                                                                                        scaler=scaler,
+                                                                                        args=args)
 
             writer.add_scalar("val/loss", val_mean_loss, global_step=epoch)
             writer.add_scalar("val/top5acc", val_mean_t5acc, global_step=epoch)
@@ -166,7 +183,7 @@ def main():
                             decoder_optimizer, recent_bleu4, is_best, scaler)
 
 
-def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_optimizer, epoch, scaler):
+def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_optimizer, epoch, scaler, args):
     """
     Performs one epoch's training.
 
@@ -198,8 +215,8 @@ def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decod
         imgs = imgs.to(device, non_blocking=True)
         caps = caps.to(device, non_blocking=True)
         caplens = caplens.to(device, non_blocking=True)
-        with autocast(enabled=enable_amp):
-            with torch.no_grad() if not fine_tune_encoder else nullcontext():
+        with autocast(enabled=args.enable_scale):
+            with torch.no_grad() if not args.finetune_encoder else nullcontext():
                 image_encodings = encoder(imgs)
 
             scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(image_encodings, caps, caplens)
@@ -218,20 +235,20 @@ def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decod
             # Add doubly stochastic attention regularization
             loss += alpha_c * ((1. - alphas.sum(dim=1)) ** 2).mean()
 
-        if fine_tune_encoder:
+        if args.finetune_encoder:
             encoder_optimizer.zero_grad()
         decoder_optimizer.zero_grad()
 
         scaler.scale(loss).backward()
 
         # gradient clip following: https://pytorch.org/docs/stable/notes/amp_examples.html#gradient-clipping
-        if fine_tune_encoder:
+        if args.finetune_encoder:
             scaler.unscale_(encoder_optimizer)
         scaler.unscale_(decoder_optimizer)
         torch.nn.utils.clip_grad_norm_(encoder.parameters(), grad_clip)  # here we change the absolute value to norm
         torch.nn.utils.clip_grad_norm_(decoder.parameters(), grad_clip)  # here we change the absolute value to norm
 
-        if fine_tune_encoder:
+        if args.finetune_encoder:
             scaler.step(encoder_optimizer)
         scaler.step(decoder_optimizer)
 
@@ -260,7 +277,7 @@ def train(*, train_loader, encoder, decoder, criterion, encoder_optimizer, decod
     return losses.avg, top5accs.avg
 
 
-def validate(val_loader, encoder, decoder, criterion, scaler):
+def validate(val_loader, encoder, decoder, criterion, scaler, args):
     """
     Performs one epoch's validation.
 
@@ -292,7 +309,7 @@ def validate(val_loader, encoder, decoder, criterion, scaler):
             imgs = imgs.to(device)
             caps = caps.to(device)
             caplens = caplens.to(device)
-            with autocast(enabled=enable_amp):
+            with autocast(enabled=args.enable_scale):
                 # Forward prop.
                 if encoder is not None:
                     imgs = encoder(imgs)
@@ -367,4 +384,5 @@ def validate(val_loader, encoder, decoder, criterion, scaler):
 
 
 if __name__ == '__main__':
-    main()
+    args = get_args()
+    main(args)

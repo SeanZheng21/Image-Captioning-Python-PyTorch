@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from cv2 import imread, resize as imresize
 # from scipy.misc import imread, imresize
-from torch.utils.data import Sampler
+from torch.utils.data import Sampler, Dataset
 from tqdm import tqdm
 
 
@@ -353,3 +353,19 @@ class IgnoreException:
         if isinstance(exc_value, self.exception):
             return
         return exc_type, exc_value, traceback
+
+
+def load_word_map(path):
+    with open(path, 'r') as j:
+        return json.load(j)
+
+
+# class ContrastiveDataset(Dataset):
+#     def __init__(self, base_dataset) -> None:
+#         super().__init__()
+#         self._base_dataset = base_dataset
+#
+#     def __getitem__(self, index):
+#         img, caption1, *others = self._base_dataset[index]
+#         _, caption2, *_ = self._base_dataset[index]
+#         return img, (caption1, caption2), *others

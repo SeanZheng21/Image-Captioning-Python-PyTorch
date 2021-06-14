@@ -6,6 +6,7 @@ from functools import lru_cache
 
 import h5py
 import torch
+from loguru import logger
 from torch.utils.data import Dataset, DataLoader
 
 
@@ -89,7 +90,7 @@ class CaptionDataset2(Dataset):
     A PyTorch Dataset class to be used in a PyTorch DataLoader to create batches.
     """
 
-    def __init__(self, data_folder, data_name, split, transform=None):
+    def __init__(self, data_folder, data_name, split, transform=None, force_output_all_caption=False):
         """
         :param data_folder: folder where data files are stored
         :param data_name: base name of processed datasets
@@ -100,6 +101,7 @@ class CaptionDataset2(Dataset):
         assert self.split in {'TRAIN', 'VAL', 'TEST'}, self.split
         self._data_folder = data_folder
         self._data_name = data_name
+        self._force_output_all_caption = force_output_all_caption
 
         # Load encoded captions (completely into memory)
         caption_path = os.path.join(data_folder, self.split + '_CAPTIONS_' + data_name + '.json')
@@ -114,6 +116,8 @@ class CaptionDataset2(Dataset):
         assert len(self.captions) % self._cpi == 0
         self.transform = transform
         self.dataset_size = int(len(self.captions) / self._cpi)
+        if on_debug():
+            logger.debug(f"debug mode detected")
 
     def __getitem__(self, index):
         # Open hdf5 file where images are stored
@@ -136,10 +140,11 @@ class CaptionDataset2(Dataset):
                 caplen = random.choice(self.caplens[(index * self._cpi):((index + 1) * self._cpi)])
             caption = torch.LongTensor(single_caption)
             caplen = torch.LongTensor([caplen])
+            if self._force_output_all_caption:
+                return img, caption, caplen, all_captions
 
             if self.split == 'TRAIN':
                 return img, caption, caplen
-
             # For validation of testing, also return all 'captions_per_image' captions to find BLEU-4 score
             return img, caption, caplen, all_captions
 
@@ -163,19 +168,19 @@ class PadCollate:
 
     def __call__(self, batch):
         batch_size = len(batch)
-        img, caption, caplen = list(zip(*batch))
+        img, caption, caplen, *all_captions = list(zip(*batch))
         tensor_image = torch.stack(img, dim=0)
         max_length = 0
         for c in caption:
             max_length = max(max_length, len([x for x in c if x != 0]))
-        new_caption = torch.zeros(batch_size, max_length+1, dtype=torch.long)
+        new_caption = torch.zeros(batch_size, max_length + 1, dtype=torch.long)
         for i, c in enumerate(caption):
             cur_c = torch.Tensor([x for x in c if x != 0])
             new_caption[i][:len(cur_c)] = cur_c
 
         new_caplen = torch.Tensor(caplen).long()
 
-        return tensor_image, new_caption, new_caplen.unsqueeze(1)
+        return tensor_image, new_caption, new_caplen.unsqueeze(1), *all_captions
 
 
 if __name__ == '__main__':
