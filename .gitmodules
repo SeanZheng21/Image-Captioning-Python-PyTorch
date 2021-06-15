@@ -1,0 +1,3 @@
+[submodule "thirdparty/SimCSE"]
+	path = thirdparty/SimCSE
+	url = https://github.com/jizongFox/SimCSE.git
